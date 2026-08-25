@@ -1,268 +1,442 @@
 #!/usr/bin/env python3
-"""
-Wongnai scraper — extracts restaurant/business data from window._wn JSON.
-Wongnai embeds a full Redux store in the page that we parse directly.
+"""Capture bounded Wongnai restaurant listings from public HTML.
 
-MCP Tool: get_restaurant_reviews
-Data: name, rating, address, phone, categories, price range, location, URL
+Wongnai does not expose a source-specific API in this workflow. The public
+restaurant page embeds its server-rendered state in ``window._wn``; this
+adapter reads that payload, paginates conservatively, and applies a second
+location check because the landing page can contain nationwide suggestions
+even when a location query is present.
+
+This repository is the collection producer. Durable restaurant lake/API
+ownership remains with the downstream data product.
 """
 
-import asyncio
+from __future__ import annotations
+
 import csv
 import json
-import logging
+import math
 import re
-import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Iterable
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+try:
+    import httpx
+    from bs4 import BeautifulSoup
+except ImportError as exc:  # pragma: no cover - requirements.txt supplies both
+    raise RuntimeError("httpx and beautifulsoup4 are required for Wongnai capture") from exc
 
-import httpx
-from adapters.outbound.engines.base import BaseScraper
 
-logger = logging.getLogger(__name__)
-
-OUTPUT_DIR = Path(__file__).parent.parent.parent / "data"
-
-# Location keys for different areas
-LOCATION_KEYS = {
-    "bangkok": "1",
-    "chiangmai": "4",
-    "phuket": "7",
-    "pattaya": "5",
-    "khonkaen": "6",
-    "hua_hin": "10",
-    "ayutthaya": "3",
-    "korat": "8",
+ROOT = Path(__file__).resolve().parents[1]
+OUTPUT_DIR = ROOT / "data" / "exported"
+SOURCE_URL = "https://www.wongnai.com/restaurants?locationKey=1"
+SOURCE_NAME = "Wongnai"
+DEFAULT_LOCATIONS = ["bangkok"]
+DEFAULT_PAGE_SIZE = 100
+MAX_PAGES = 5
+MAX_PAGE_SIZE = 100
+MAX_ROWS = 500
+MIN_ROWS = 5
+ALLOWED_HOST = re.compile(r"(?:www\.)?wongnai\.com", re.IGNORECASE)
+LOCATION_ALIASES = {
+    "bangkok": {"กรุงเทพมหานคร", "กรุงเทพฯ", "กรุงเทพ", "bangkok"},
+    "chiangmai": {"เชียงใหม่", "chiang mai", "chiangmai"},
+    "phuket": {"ภูเก็ต", "phuket"},
+    "khonkaen": {"ขอนแก่น", "khon kaen", "khonkaen"},
+    "korat": {"นครราชสีมา", "โคราช", "nakhon ratchasima", "korat"},
+    "pattaya": {"พัทยา", "ชลบุรี", "pattaya", "chon buri"},
 }
+SNAPSHOT_FIELDS = [
+    "captured_at",
+    "restaurant_id",
+    "name",
+    "branch",
+    "categories",
+    "rating",
+    "review_count",
+    "price_range",
+    "price_range_value",
+    "address",
+    "district",
+    "subdistrict",
+    "city",
+    "phone",
+    "homepage",
+    "latitude",
+    "longitude",
+    "url",
+    "image_url",
+    "verified_location",
+    "location",
+    "source",
+    "source_url",
+    "page_number",
+]
+HISTORY_FIELDS = [
+    "captured_at",
+    "restaurant_id",
+    "name",
+    "rating",
+    "review_count",
+    "price_range",
+    "city",
+    "district",
+    "url",
+    "location",
+    "source",
+]
 
-DEFAULT_LOCATIONS = ["bangkok", "chiangmai", "phuket", "pattaya"]
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "th-TH,th;q=0.9,en-US;q=0.8,en;q=0.8",
-}
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def extract_wn_data(html: str) -> Optional[dict]:
-    """Extract window._wn JSON from HTML."""
-    m = re.search(r'window\._wn\s*=\s*({.*?});?\s*</script>', html, re.DOTALL)
-    if not m:
+def _clean_text(value: Any, limit: int = 500) -> str:
+    if isinstance(value, dict):
+        value = value.get("primary") or value.get("name") or value.get("thai") or value.get("english")
+    text = str(value or "").strip()
+    return re.sub(r"\s+", " ", text)[:limit]
+
+
+def _as_values(values: Iterable[str] | str | None, default: list[str]) -> list[str]:
+    if values is None:
+        values = default
+    if isinstance(values, str):
+        values = values.split(",")
+    result: list[str] = []
+    for value in values:
+        normalized = str(value).strip().casefold()
+        if normalized and normalized not in result:
+            result.append(normalized)
+    return result
+
+
+def normalize_locations(values: Iterable[str] | str | None) -> list[str]:
+    locations = _as_values(values, DEFAULT_LOCATIONS)
+    if not locations or len(locations) > 6:
+        raise ValueError("locations must contain 1-6 Wongnai locations")
+    unknown = [location for location in locations if location not in LOCATION_ALIASES]
+    if unknown:
+        raise ValueError(f"unsupported Wongnai location(s): {', '.join(unknown)}")
+    return locations
+
+
+def normalize_source_url(value: str = SOURCE_URL) -> str:
+    parts = urlsplit(str(value).strip())
+    host = (parts.hostname or "").lower()
+    path = parts.path.rstrip("/") or "/"
+    if parts.scheme.lower() != "https" or not ALLOWED_HOST.fullmatch(host) or path != "/restaurants":
+        raise ValueError("Wongnai source URL must be an HTTPS /restaurants page")
+    query = urlencode(parse_qsl(parts.query, keep_blank_values=True))
+    return urlunsplit(("https", host, path, query, ""))
+
+
+def build_page_url(source_url: str, page_number: int, page_size: int = DEFAULT_PAGE_SIZE) -> str:
+    if isinstance(page_number, bool) or not isinstance(page_number, int) or page_number < 1:
+        raise ValueError("page_number must be a positive integer")
+    if isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= MAX_PAGE_SIZE:
+        raise ValueError(f"page_size must be an integer from 1 to {MAX_PAGE_SIZE}")
+    base = normalize_source_url(source_url)
+    query = dict(parse_qsl(urlsplit(base).query, keep_blank_values=True))
+    query.update({"page.number": str(page_number), "page.size": str(page_size), "rerank": "false"})
+    return urlunsplit(("https", urlsplit(base).hostname or "www.wongnai.com", "/restaurants", urlencode(query), ""))
+
+
+def canonical_url(value: str) -> str:
+    candidate = urljoin("https://www.wongnai.com/", str(value).strip())
+    parts = urlsplit(candidate)
+    host = (parts.hostname or "").lower()
+    path = parts.path.rstrip("/") or "/"
+    if parts.scheme.lower() != "https" or not ALLOWED_HOST.fullmatch(host):
+        raise ValueError("Wongnai restaurant URL must use an HTTPS wongnai.com host")
+    if not re.fullmatch(r"/restaurants/[^/]+", path):
+        raise ValueError("Wongnai URL must point to a restaurant detail page")
+    return urlunsplit(("https", host, path, "", ""))
+
+
+def _window_state(html: str) -> dict[str, Any]:
+    soup = BeautifulSoup(html, "html.parser")
+    for script in soup.find_all("script"):
+        text = script.string or script.get_text()
+        marker = "window._wn ="
+        if marker not in text:
+            continue
+        start = text.index(marker) + len(marker)
+        try:
+            state, _ = json.JSONDecoder().raw_decode(text[start:].lstrip())
+        except json.JSONDecodeError as exc:
+            raise ValueError("Wongnai window._wn is not valid JSON") from exc
+        if not isinstance(state, dict):
+            raise ValueError("Wongnai window._wn must be a JSON object")
+        return state
+    raise ValueError("Wongnai page is missing window._wn")
+
+
+def _businesses(state: dict[str, Any]) -> list[dict[str, Any]]:
+    store = state.get("store")
+    value = store.get("searchResult", {}).get("value") if isinstance(store, dict) else None
+    entries = value.get("data") if isinstance(value, dict) else None
+    if not isinstance(entries, list):
+        raise ValueError("Wongnai page is missing searchResult data")
+    return [entry["business"] for entry in entries if isinstance(entry, dict) and isinstance(entry.get("business"), dict)]
+
+
+def _number(value: Any, *, minimum: float, maximum: float) -> float | None:
+    if isinstance(value, bool) or value in (None, ""):
         return None
     try:
-        return json.loads(m.group(1))
-    except json.JSONDecodeError:
+        number = float(value)
+    except (TypeError, ValueError):
         return None
+    if not math.isfinite(number) or number < minimum or number > maximum:
+        return None
+    return number
 
 
-def parse_business(item: dict) -> dict:
-    """Parse a business item from Wongnai's Redux store."""
-    biz = item.get("business", {})
-    if not biz:
-        return {}
-
-    contact = biz.get("contact", {}) or {}
-    stats = biz.get("statistic", {}) or {}
-    categories = biz.get("categories", []) or []
-    neighborhoods = biz.get("neighborhoods", []) or []
-    price_range = biz.get("priceRange", {}) or {}
-
-    # Extract category names
-    cat_names = [c.get("name", "") for c in categories if c.get("name")]
-    cat_intl = [c.get("internationalName", "") for c in categories if c.get("internationalName")]
-
-    # Extract neighborhood
-    hood = ""
-    if neighborhoods:
-        n = neighborhoods[0]
-        if isinstance(n, dict):
-            hood = n.get("name", "")
-        elif isinstance(n, str):
-            hood = n
-
-    return {
-        "name": biz.get("displayName") or biz.get("name", ""),
-        "rating": biz.get("rating", 0),
-        "num_reviews": stats.get("numberOfReviews", 0),
-        "num_bookmarks": stats.get("numberOfBookmarks", 0),
-        "address": contact.get("address", ""),
-        "phone": contact.get("phone", ""),
-        "email": contact.get("email", ""),
-        "website": contact.get("homepage", ""),
-        "categories_th": ", ".join(cat_names),
-        "categories_en": ", ".join(cat_intl),
-        "neighborhood": hood,
-        "price_range": price_range.get("name", ""),
-        "lat": biz.get("lat"),
-        "lng": biz.get("lng"),
-        "zipcode": biz.get("zipcode", ""),
-        "url": f"https://www.wongnai.com/{biz.get('url', '')}",
-        "featured": biz.get("featured", False),
-        "official": biz.get("official", False),
-    }
+def _integer(value: Any) -> int:
+    if isinstance(value, bool) or value in (None, ""):
+        return 0
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return number if number >= 0 else 0
 
 
-def build_url(location_key: str, page: int = 1) -> str:
-    """Build Wongnai URL with location and pagination."""
-    base = f"https://www.wongnai.com/restaurants?locationKey={location_key}"
-    if page > 1:
-        base += f"&page={page}"
-    return base
+def _address(business: dict[str, Any]) -> dict[str, Any]:
+    contact = business.get("contact")
+    address = contact.get("address") if isinstance(contact, dict) else None
+    return address if isinstance(address, dict) else {}
 
 
-class WongnaiScraper(BaseScraper):
-    """Scrape restaurant/business listings from Wongnai using embedded JSON."""
+def _location_matches(address: dict[str, Any], location: str) -> bool:
+    city = address.get("city")
+    if not isinstance(city, dict):
+        return False
+    if location == "bangkok" and city.get("id") == 1:
+        return True
+    names = {_clean_text(value).casefold() for value in (city.get("name"), address.get("district"), address.get("subDistrict"))}
+    return bool(names & {alias.casefold() for alias in LOCATION_ALIASES[location]})
 
-    def __init__(self, **kwargs):
-        super().__init__(
-            name="wongnai",
-            rate_limit=kwargs.get("rate_limit", 4.0),
-            max_retries=3,
-            timeout=30.0,
+
+def _image_url(business: dict[str, Any]) -> str:
+    for key in ("mainPhoto", "defaultPhoto"):
+        photo = business.get(key)
+        if isinstance(photo, dict) and photo.get("contentUrl"):
+            return _clean_text(photo.get("contentUrl"), 1000)
+    return ""
+
+
+def _categories(business: dict[str, Any]) -> str:
+    values: list[str] = []
+    for category in business.get("categories") or []:
+        if not isinstance(category, dict):
+            continue
+        name = _clean_text(category.get("name"), 100)
+        if name and name not in values:
+            values.append(name)
+    return ",".join(values[:10])
+
+
+def parse_html(
+    html: str,
+    source_url: str = SOURCE_URL,
+    locations: Iterable[str] | str | None = None,
+    page_number: int = 1,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Parse Wongnai's embedded state and keep only location-matched rows."""
+
+    normalized_source = normalize_source_url(source_url)
+    requested_locations = normalize_locations(locations)
+    state = _window_state(html)
+    rows: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for business in _businesses(state):
+        restaurant_id = str(business.get("id") or "").strip()
+        if not restaurant_id.isdigit() or int(restaurant_id) <= 0 or restaurant_id in seen_ids:
+            continue
+        address = _address(business)
+        location = next((value for value in requested_locations if _location_matches(address, value)), None)
+        if location is None:
+            continue
+        name = _clean_text(business.get("displayName") or business.get("name") or business.get("nameOnly"), 300)
+        if not name:
+            continue
+        try:
+            url = canonical_url(business.get("rUrl") or business.get("url") or "")
+        except ValueError:
+            continue
+        price_range = business.get("priceRange") if isinstance(business.get("priceRange"), dict) else {}
+        contact = business.get("contact") if isinstance(business.get("contact"), dict) else {}
+        statistic = business.get("statistic") if isinstance(business.get("statistic"), dict) else {}
+        city = address.get("city") if isinstance(address.get("city"), dict) else {}
+        district = address.get("district") if isinstance(address.get("district"), dict) else {}
+        subdistrict = address.get("subDistrict") if isinstance(address.get("subDistrict"), dict) else {}
+        rating = _number(business.get("rating") or statistic.get("rating"), minimum=0, maximum=5)
+        rows.append(
+            {
+                "restaurant_id": restaurant_id,
+                "name": name,
+                "branch": _clean_text(business.get("branch"), 200),
+                "categories": _categories(business),
+                "rating": rating if rating is not None else "",
+                "review_count": _integer(statistic.get("numberOfReviews")),
+                "price_range": _clean_text(price_range.get("name"), 100),
+                "price_range_value": _integer(price_range.get("value")),
+                "address": _clean_text(address.get("street"), 500),
+                "district": _clean_text(district, 100),
+                "subdistrict": _clean_text(subdistrict, 100),
+                "city": _clean_text(city, 100),
+                "phone": _clean_text(contact.get("phoneno") or contact.get("callablePhoneno"), 80),
+                "homepage": _clean_text(contact.get("homepage"), 500),
+                "latitude": _number(business.get("lat"), minimum=-90, maximum=90) or "",
+                "longitude": _number(business.get("lng"), minimum=-180, maximum=180) or "",
+                "url": url,
+                "image_url": _image_url(business),
+                "verified_location": bool(business.get("verifiedLocation")),
+                "location": location,
+                "source": SOURCE_NAME,
+                "source_url": normalized_source,
+                "page_number": page_number,
+            }
         )
-        self.locations = kwargs.get("locations", DEFAULT_LOCATIONS)
-        self.max_pages = kwargs.get("max_pages", 3)
-
-    async def fetch_page(self, url: str) -> Optional[str]:
-        """Fetch a page with retries."""
-        await self._wait_for_rate_limit()
-        self.stats["requests"] += 1
-
-        for attempt in range(self.max_retries):
-            try:
-                async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True) as client:
-                    resp = await client.get(url, headers=HEADERS)
-                    if resp.status_code >= 400:
-                        logger.warning(f"[HTTP {resp.status_code}] {url}")
-                        continue
-                    self.stats["misses"] += 1
-                    return resp.text
-            except Exception as e:
-                logger.error(f"[ERROR] {url}: {e} (attempt {attempt+1})")
-                if attempt < self.max_retries - 1:
-                    await asyncio.sleep(2 ** attempt)
-
-        self.stats["errors"] += 1
-        return None
-
-    def parse_page(self, html: str) -> List[dict]:
-        """Extract businesses from window._wn JSON."""
-        data = extract_wn_data(html)
-        if not data:
-            return []
-
-        store = data.get("store", {})
-        sr = store.get("searchResult", {})
-        value = sr.get("value", {})
-        items = value.get("data", [])
-
-        results = []
-        for item in items:
-            biz = parse_business(item)
-            if biz.get("name"):
-                results.append(biz)
-
-        return results
-
-    async def scrape_location(self, location_name: str, max_pages: int = 3):
-        """Scrape all pages for a location."""
-        loc_key = LOCATION_KEYS.get(location_name, "1")
-        all_items = []
-
-        for page in range(1, max_pages + 1):
-            url = build_url(loc_key, page)
-            logger.info(f"Scraping Wongnai: {location_name} page {page}")
-
-            html = await self.fetch_page(url)
-            if not html:
-                break
-
-            items = self.parse_page(html)
-            if not items:
-                break
-
-            all_items.extend(items)
-            logger.info(f"  Page {page}: {len(items)} businesses")
-
-            # Check if there's a next page
-            data = extract_wn_data(html)
-            if data:
-                next_page = data.get("store", {}).get("searchResult", {}).get("value", {}).get("next")
-                if not next_page:
-                    break
-
-        for item in all_items:
-            item["location_search"] = location_name
-            self.add_result(item)
-
-        return len(all_items)
-
-    async def run(self, locations: list = None, max_pages: int = None, **kwargs):
-        """Run scraper for all locations."""
-        locations = locations or self.locations
-        max_pages = max_pages or self.max_pages
-
-        total = 0
-        for loc in locations:
-            count = await self.scrape_location(loc, max_pages)
-            total += count
-            logger.info(f"  {loc}: {count} businesses total")
-
-        self.print_stats()
-        self.export_csv("wongnai_businesses.csv")
-        self.export_json("wongnai_businesses.json")
-
-        # Also save to data/ directory for dashboard
-        if self.results:
-            save_results(self.results, OUTPUT_DIR)
-
-        return self.results
+        seen_ids.add(restaurant_id)
+    return state, rows
 
 
-def save_results(results: list, output_dir: Path):
-    """Save results to data/ directory."""
+def _dedupe_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        key = str(row.get("restaurant_id") or row.get("url") or "").strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(row)
+    return result
+
+
+def fetch_pages(
+    source_url: str,
+    locations: list[str],
+    max_pages: int,
+    page_size: int,
+    min_rows: int = MIN_ROWS,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if isinstance(max_pages, bool) or not isinstance(max_pages, int) or not 1 <= max_pages <= MAX_PAGES:
+        raise ValueError(f"max_pages must be an integer from 1 to {MAX_PAGES}")
+    if isinstance(min_rows, bool) or not isinstance(min_rows, int) or not 1 <= min_rows <= MAX_ROWS:
+        raise ValueError(f"min_rows must be an integer from 1 to {MAX_ROWS}")
+    normalized_source = normalize_source_url(source_url)
+    raw_pages: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
+    for page_number in range(1, max_pages + 1):
+        page_url = build_page_url(normalized_source, page_number, page_size)
+        response = httpx.get(
+            page_url,
+            headers={
+                "User-Agent": "book-job-scraping/1.0",
+                "Accept": "text/html,application/xhtml+xml",
+            },
+            timeout=30,
+            follow_redirects=True,
+        )
+        response.raise_for_status()
+        if not response.content:
+            raise ValueError(f"Wongnai page {page_number} response is empty")
+        _, page_rows = parse_html(response.text, normalized_source, locations, page_number)
+        raw_pages.append({"page_number": page_number, "url": str(response.url), "html": response.text})
+        rows.extend(page_rows)
+    rows = _dedupe_rows(rows)[:MAX_ROWS]
+    if len(rows) < min_rows:
+        raise ValueError(f"Wongnai capture produced only {len(rows)} location-matched restaurants; need at least {min_rows}")
+    return raw_pages, rows
+
+
+def write_raw(raw_pages: list[dict[str, Any]], output_dir: Path, stem: str) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / f"{stem}_raw.json"
+    path.write_text(json.dumps(raw_pages, ensure_ascii=False), encoding="utf-8")
+    return path
 
-    fieldnames = [
-        "name", "rating", "num_reviews", "num_bookmarks", "address", "phone",
-        "categories_th", "categories_en", "neighborhood", "price_range",
-        "lat", "lng", "zipcode", "url", "featured", "official", "location_search",
-    ]
 
-    # Current snapshot
-    csv_path = output_dir / "wongnai_businesses.csv"
-    with open(csv_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+def write_snapshot(rows: list[dict[str, Any]], captured_at: str, output_dir: Path, stem: str) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / f"{stem}.csv"
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=SNAPSHOT_FIELDS, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(results)
+        for row in rows:
+            writer.writerow({**row, "captured_at": captured_at})
+    return path
 
-    # History append
-    history_path = output_dir / "wongnai_history.csv"
-    file_exists = history_path.exists()
-    with open(history_path, "a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames + ["scraped_at"], extrasaction="ignore")
-        if not file_exists:
+
+def append_history(rows: list[dict[str, Any]], captured_at: str, output_dir: Path, stem: str) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / f"{stem}_history.csv"
+    exists = path.exists()
+    with path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=HISTORY_FIELDS, extrasaction="ignore")
+        if not exists:
             writer.writeheader()
-        now = datetime.now().isoformat()
-        for r in results:
-            row = {**r, "scraped_at": now}
-            writer.writerow(row)
-
-    logger.info(f"Saved {len(results)} businesses to {csv_path}")
+        for row in rows:
+            writer.writerow({**row, "captured_at": captured_at})
+    return path
 
 
-async def main():
-    scraper = WongnaiScraper()
-    results = await scraper.run()
-    print(f"\nTotal businesses scraped: {len(results)}")
+class WongnaiScraper:
+    """Scheduler adapter for bounded, location-validated Wongnai capture."""
+
+    def __init__(
+        self,
+        locations: Iterable[str] | str | None = None,
+        page_size: int = DEFAULT_PAGE_SIZE,
+        min_rows: int = MIN_ROWS,
+        output_stem: str = "wongnai_bangkok",
+        source_url: str = SOURCE_URL,
+        output_dir: str | Path | None = None,
+        **_: Any,
+    ) -> None:
+        self.locations = normalize_locations(locations)
+        if isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= MAX_PAGE_SIZE:
+            raise ValueError(f"page_size must be an integer from 1 to {MAX_PAGE_SIZE}")
+        if isinstance(min_rows, bool) or not isinstance(min_rows, int) or not 1 <= min_rows <= MAX_ROWS:
+            raise ValueError(f"min_rows must be an integer from 1 to {MAX_ROWS}")
+        if not re.fullmatch(r"[a-z0-9_]+", output_stem):
+            raise ValueError("output_stem must contain only lowercase letters, numbers, and underscores")
+        self.page_size = page_size
+        self.min_rows = min_rows
+        self.output_stem = output_stem
+        self.source_url = normalize_source_url(source_url)
+        self.output_dir = Path(output_dir) if output_dir else OUTPUT_DIR
+
+    async def run(self, max_pages: int = 3, **_: Any) -> list[dict[str, Any]]:
+        raw_pages, rows = fetch_pages(
+            self.source_url,
+            self.locations,
+            max_pages=max_pages,
+            page_size=self.page_size,
+            min_rows=self.min_rows,
+        )
+        captured_at = _utc_now()
+        raw_path = write_raw(raw_pages, self.output_dir, self.output_stem)
+        snapshot_path = write_snapshot(rows, captured_at, self.output_dir, self.output_stem)
+        history_path = append_history(rows, captured_at, self.output_dir, self.output_stem)
+        print(f"[{self.output_stem}] {len(rows)} restaurants -> {snapshot_path}")
+        return [
+            {
+                "source": self.output_stem,
+                "count": len(rows),
+                "output": str(snapshot_path),
+                "history": str(history_path),
+                "raw": str(raw_path),
+            }
+        ]
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    asyncio.run(main())
+    import asyncio
+
+    asyncio.run(WongnaiScraper().run())

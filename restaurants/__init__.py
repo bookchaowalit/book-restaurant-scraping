@@ -1,1 +1,1 @@
-"""Restaurant and review scrapers."""
+"""Restaurant source adapters."""
