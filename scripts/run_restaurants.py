@@ -62,7 +62,13 @@ async def run_restaurants(
             source_url=job["source_url"],
             output_dir=output_dir,
         )
-        batch = await scraper.run(max_pages=max_pages)
+        try:
+            batch = await scraper.run(max_pages=max_pages)
+        except Exception as exc:  # noqa: BLE001 - isolate each job
+            # Record only the exception class so page content never leaks.
+            results.append({"job": job["name"], "error": type(exc).__name__})
+            print(f"[run_restaurants] {job['name']}: failed ({type(exc).__name__})", file=sys.stderr)
+            continue
         results.extend(batch)
         print(f"[run_restaurants] {job['name']}: {batch[0].get('count') if batch else 0}")
     return results
@@ -79,7 +85,7 @@ def main() -> int:
     results = asyncio.run(run_restaurants(args.output_dir, args.max_pages, args.min_rows, dry_run=args.dry_run))
     if args.json:
         print(json.dumps(results, ensure_ascii=False))
-    return 0
+    return 1 if any("error" in result for result in results) else 0
 
 
 if __name__ == "__main__":

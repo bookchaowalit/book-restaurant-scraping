@@ -26,6 +26,33 @@ bash setup_cron.sh install   # optional; weekly Sunday 00:15
 
 Output stays in this repository's `data/exported/`.
 
+## Polite collection
+
+`restaurants/http.py` is the only network path: an identifying `User-Agent`
+(`book-restaurant-scraping/1.0`), a 30 s timeout, and at most three attempts
+with exponential backoff that retry only timeouts, connection errors, HTTP 429
+(honouring `Retry-After`, capped at 60 s) and 5xx; 403/404 fail at once.
+`fetch_pages` waits 2 s between pages, is capped at 5 pages x 100 rows, and
+stops as soon as a page returns no results. `scripts/run_restaurants.py`
+isolates jobs: a failing job is reported as `{"job": ..., "error":
+"<ExceptionClass>"}` and the exit code is 1.
+
+Rows keep only business contact data that Wongnai publishes for the venue
+(address, business phone, homepage). Raw page captures stay under the
+git-ignored `data/` directory.
+
+## Checks (offline)
+
+```bash
+pip install -r requirements.txt pytest ruff
+ruff check .
+python -m pytest -q
+python3 scripts/run_restaurants.py --dry-run --json   # plan only, no network
+```
+
+Tests replay `tests/fixtures/` and mock the HTTP layer; CI
+(`.github/workflows/ci.yml`) runs the same commands.
+
 ## Boundaries
 
 - **Not** a lake-first data product. Durable market datasets live under `book-*-data` repos.

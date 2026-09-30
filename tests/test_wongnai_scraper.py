@@ -1,8 +1,12 @@
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+import httpx
 
 from restaurants.wongnai_scraper import (
     build_page_url,
+    fetch_pages,
     canonical_url,
     normalize_locations,
     parse_html,
@@ -11,6 +15,12 @@ from restaurants.wongnai_scraper import (
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests" / "fixtures" / "wongnai_restaurants.html"
+EMPTY_PAGE = '<html><script>window._wn = {"store": {"searchResult": {"value": {"data": []}}}}</script></html>'
+SOURCE = "https://www.wongnai.com/restaurants?locationKey=1"
+
+
+def _page(html: str, url: str = SOURCE) -> httpx.Response:
+    return httpx.Response(200, text=html, request=httpx.Request("GET", url))
 
 
 class WongnaiScraperTests(unittest.TestCase):
@@ -58,6 +68,44 @@ class WongnaiScraperTests(unittest.TestCase):
             normalize_locations(["mars"])
         with self.assertRaises(ValueError):
             canonical_url("https://example.com/restaurants/123-place")
+
+    def test_fetch_pages_spaces_requests_and_stops_on_empty_page(self):
+        sleeps: list[float] = []
+        pages = [_page(self.html), _page(EMPTY_PAGE), _page(self.html)]
+        with patch("restaurants.http.httpx.get", side_effect=pages) as get:
+            raw_pages, rows = fetch_pages(SOURCE, ["bangkok"], max_pages=3, page_size=100, min_rows=1, sleep=sleeps.append)
+        self.assertEqual(get.call_count, 2)
+        self.assertEqual(sleeps, [2.0])
+        self.assertEqual(len(raw_pages), 2)
+        self.assertEqual([row["restaurant_id"] for row in rows], ["1001", "1003"])
+
+    def test_fetch_pages_deduplicates_across_pages_and_enforces_min_rows(self):
+        pages = [_page(self.html), _page(self.html)]
+        with patch("restaurants.http.httpx.get", side_effect=pages):
+            _raw, rows = fetch_pages(SOURCE, ["bangkok"], max_pages=2, page_size=100, min_rows=1, sleep=lambda _s: None)
+        self.assertEqual(len(rows), 2)
+        with patch("restaurants.http.httpx.get", side_effect=[_page(self.html)]):
+            with self.assertRaises(ValueError):
+                fetch_pages(SOURCE, ["bangkok"], max_pages=1, page_size=100, min_rows=5, sleep=lambda _s: None)
+
+    def test_fetch_pages_rejects_unbounded_page_counts(self):
+        for bad in (0, 6, True):
+            with self.assertRaises(ValueError):
+                fetch_pages(SOURCE, ["bangkok"], max_pages=bad, page_size=100)
+
+    def test_parse_tolerates_malformed_business_entries(self):
+        html = (
+            '<script>window._wn = {"store": {"searchResult": {"value": {"data": ['
+            '"junk", {"business": null}, {"business": {"id": "-4"}},'
+            '{"business": {"id": "77", "displayName": "No city"}},'
+            '{"business": {"id": "78", "displayName": "Ok", "rUrl": "/restaurants/78-ok",'
+            ' "rating": "NaN", "lat": 999, "contact": {"address": {"city": {"id": 1}}}}}'
+            ']}}}}</script>'
+        )
+        _state, rows = parse_html(html, SOURCE, ["bangkok"])
+        self.assertEqual([row["restaurant_id"] for row in rows], ["78"])
+        self.assertEqual(rows[0]["rating"], "")
+        self.assertEqual(rows[0]["latitude"], "")
 
 
 if __name__ == "__main__":

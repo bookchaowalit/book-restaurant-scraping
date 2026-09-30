@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -23,6 +24,22 @@ class RunRestaurantsTests(unittest.TestCase):
             result = asyncio.run(run_restaurants(Path(directory), dry_run=True))
         self.assertEqual([item["status"] for item in result], ["dry-run", "dry-run"])
         self.assertTrue(all(item["network"] == "not-used" for item in result))
+
+    def test_failing_job_does_not_block_the_next_one(self):
+        calls = []
+
+        async def fake_run(self, max_pages=3, **_kwargs):
+            calls.append(self.output_stem)
+            if self.output_stem == "wongnai_bangkok":
+                raise RuntimeError("page content must not leak")
+            return [{"source": self.output_stem, "count": 7}]
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("restaurants.wongnai_scraper.WongnaiScraper.run", fake_run):
+                result = asyncio.run(run_restaurants(Path(directory)))
+        self.assertEqual(calls, ["wongnai_bangkok", "wongnai_upcountry"])
+        self.assertEqual(result[0], {"job": "wongnai_bangkok", "error": "RuntimeError"})
+        self.assertEqual(result[1]["count"], 7)
 
 
 if __name__ == "__main__":

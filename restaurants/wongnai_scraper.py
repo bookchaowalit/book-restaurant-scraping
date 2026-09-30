@@ -19,14 +19,16 @@ import math
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+import time
+from typing import Any, Callable, Iterable
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 try:
-    import httpx
     from bs4 import BeautifulSoup
 except ImportError as exc:  # pragma: no cover - requirements.txt supplies both
     raise RuntimeError("httpx and beautifulsoup4 are required for Wongnai capture") from exc
+
+from restaurants.http import PAGE_DELAY_SECONDS, polite_get
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -324,7 +326,15 @@ def fetch_pages(
     max_pages: int,
     page_size: int,
     min_rows: int = MIN_ROWS,
+    *,
+    page_delay: float = PAGE_DELAY_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Fetch up to ``max_pages`` pages politely.
+
+    Pages are spaced by ``page_delay`` seconds and collection stops early once
+    a page has no search results, so an exhausted listing is not re-requested.
+    """
     if isinstance(max_pages, bool) or not isinstance(max_pages, int) or not 1 <= max_pages <= MAX_PAGES:
         raise ValueError(f"max_pages must be an integer from 1 to {MAX_PAGES}")
     if isinstance(min_rows, bool) or not isinstance(min_rows, int) or not 1 <= min_rows <= MAX_ROWS:
@@ -333,22 +343,15 @@ def fetch_pages(
     raw_pages: list[dict[str, Any]] = []
     rows: list[dict[str, Any]] = []
     for page_number in range(1, max_pages + 1):
+        if page_number > 1 and page_delay > 0:
+            sleep(page_delay)
         page_url = build_page_url(normalized_source, page_number, page_size)
-        response = httpx.get(
-            page_url,
-            headers={
-                "User-Agent": "book-job-scraping/1.0",
-                "Accept": "text/html,application/xhtml+xml",
-            },
-            timeout=30,
-            follow_redirects=True,
-        )
-        response.raise_for_status()
-        if not response.content:
-            raise ValueError(f"Wongnai page {page_number} response is empty")
-        _, page_rows = parse_html(response.text, normalized_source, locations, page_number)
+        response = polite_get(page_url, source=f"Wongnai page {page_number}", sleep=sleep)
+        state, page_rows = parse_html(response.text, normalized_source, locations, page_number)
         raw_pages.append({"page_number": page_number, "url": str(response.url), "html": response.text})
         rows.extend(page_rows)
+        if not _businesses(state):
+            break
     rows = _dedupe_rows(rows)[:MAX_ROWS]
     if len(rows) < min_rows:
         raise ValueError(f"Wongnai capture produced only {len(rows)} location-matched restaurants; need at least {min_rows}")
