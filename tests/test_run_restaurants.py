@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from run_restaurants import JOBS, run_restaurants
+from run_restaurants import JOBS, main, run_restaurants
 
 
 class RunRestaurantsTests(unittest.TestCase):
@@ -40,6 +40,17 @@ class RunRestaurantsTests(unittest.TestCase):
         self.assertEqual(calls, ["wongnai_bangkok", "wongnai_upcountry"])
         self.assertEqual(result[0], {"job": "wongnai_bangkok", "error": "RuntimeError"})
         self.assertEqual(result[1]["count"], 7)
+
+    def test_cli_rejects_out_of_range_values_before_any_work(self):
+        for argv in (["--max-pages", "0"], ["--max-pages", "6"], ["--min-rows", "0"], ["--min-rows", "x"]):
+            with self.subTest(argv=argv), patch("sys.stderr"):
+                with self.assertRaises(SystemExit) as ctx:
+                    main([*argv, "--dry-run"])
+                self.assertEqual(ctx.exception.code, 2)
+
+    def test_cli_dry_run_accepts_bounds(self):
+        with patch("sys.stdout"):
+            self.assertEqual(main(["--max-pages", "5", "--min-rows", "500", "--dry-run", "--json"]), 0)
 
 
 if __name__ == "__main__":

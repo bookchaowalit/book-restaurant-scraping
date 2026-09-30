@@ -74,14 +74,30 @@ async def run_restaurants(
     return results
 
 
-def main() -> int:
+def _bounded_int(minimum: int, maximum: int):
+    def parse(value: str) -> int:
+        try:
+            number = int(value)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"expected an integer, got {value!r}") from None
+        if not minimum <= number <= maximum:
+            raise argparse.ArgumentTypeError(f"must be from {minimum} to {maximum}")
+        return number
+
+    return parse
+
+
+def main(argv: list[str] | None = None) -> int:
+    # Bounds mirror restaurants.wongnai_scraper (MAX_PAGES=5, MAX_ROWS=500) so
+    # bad values fail here, before any network call. Kept literal so the
+    # dry-run path does not import the scraper's live dependencies.
     parser = argparse.ArgumentParser(description="Run book-restaurant-scraping Wongnai jobs")
-    parser.add_argument("--max-pages", type=int, default=3)
-    parser.add_argument("--min-rows", type=int, default=20)
+    parser.add_argument("--max-pages", type=_bounded_int(1, 5), default=3)
+    parser.add_argument("--min-rows", type=_bounded_int(1, 500), default=20)
     parser.add_argument("--output-dir", type=Path, default=ROOT / "data" / "exported")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--dry-run", action="store_true", help="Print the bounded job plan without collection or writes")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     results = asyncio.run(run_restaurants(args.output_dir, args.max_pages, args.min_rows, dry_run=args.dry_run))
     if args.json:
         print(json.dumps(results, ensure_ascii=False))

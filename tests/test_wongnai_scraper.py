@@ -10,6 +10,7 @@ from restaurants.wongnai_scraper import (
     canonical_url,
     normalize_locations,
     parse_html,
+    trimmed_capture,
 )
 
 
@@ -106,6 +107,46 @@ class WongnaiScraperTests(unittest.TestCase):
         self.assertEqual([row["restaurant_id"] for row in rows], ["78"])
         self.assertEqual(rows[0]["rating"], "")
         self.assertEqual(rows[0]["latitude"], "")
+
+    def test_zero_coordinate_is_kept(self):
+        html = (
+            '<script>window._wn = {"store": {"searchResult": {"value": {"data": ['
+            '{"business": {"id": "5", "displayName": "Equator", "rUrl": "/restaurants/5-eq",'
+            ' "lat": 0, "lng": 0.0, "contact": {"address": {"city": {"id": 1}}}}}'
+            ']}}}}</script>'
+        )
+        _state, rows = parse_html(html, SOURCE, ["bangkok"])
+        self.assertEqual((rows[0]["latitude"], rows[0]["longitude"]), (0.0, 0.0))
+
+    def test_raw_capture_keeps_only_parsed_business_fields(self):
+        state = {
+            "session": {"token": "t"},
+            "store": {"searchResult": {"value": {"data": [{
+                "business": {
+                    "id": 9, "displayName": "Cafe", "rUrl": "/restaurants/9-cafe",
+                    "lat": 13.7, "lng": 100.5,
+                    "contact": {"address": {"city": {"id": 1}}, "phoneno": "02", "email": "x@y.z"},
+                    "statistic": {"numberOfReviews": 3, "rating": 4.1, "topReviewer": "Somchai"},
+                    "mainPhoto": {"contentUrl": "https://img/x.jpg", "uploader": "Somchai"},
+                    "review": {"text": "great", "user": {"name": "Somchai"}},
+                },
+                "highlight": "user text",
+            }]}}},
+        }
+        trimmed = trimmed_capture(state)
+        self.assertEqual(trimmed, [{
+            "id": 9, "displayName": "Cafe", "rUrl": "/restaurants/9-cafe", "lat": 13.7, "lng": 100.5,
+            "contact": {"address": {"city": {"id": 1}}, "phoneno": "02"},
+            "statistic": {"rating": 4.1, "numberOfReviews": 3},
+            "mainPhoto": {"contentUrl": "https://img/x.jpg"},
+        }])
+        self.assertNotIn("Somchai", repr(trimmed))
+
+    def test_fetch_pages_raw_capture_has_no_page_html(self):
+        with patch("restaurants.http.httpx.get", side_effect=[_page(self.html)]):
+            raw_pages, rows = fetch_pages(SOURCE, ["bangkok"], max_pages=1, page_size=100, min_rows=1)
+        self.assertNotIn("html", raw_pages[0])
+        self.assertGreaterEqual(len(raw_pages[0]["businesses"]), len(rows))
 
 
 if __name__ == "__main__":

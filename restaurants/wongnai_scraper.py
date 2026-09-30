@@ -185,6 +185,48 @@ def _businesses(state: dict[str, Any]) -> list[dict[str, Any]]:
     return [entry["business"] for entry in entries if isinstance(entry, dict) and isinstance(entry.get("business"), dict)]
 
 
+# Business keys kept in the raw capture: exactly what ``parse_html`` reads.
+# Everything else in ``window._wn`` (review snippets, reviewer names, ads,
+# session state) is dropped so raw files hold only the evidence we parse.
+RAW_BUSINESS_KEYS = (
+    "id", "displayName", "name", "nameOnly", "branch", "categories", "rating",
+    "priceRange", "lat", "lng", "rUrl", "url", "verifiedLocation",
+)
+RAW_CONTACT_KEYS = ("address", "phoneno", "callablePhoneno", "homepage")
+RAW_STATISTIC_KEYS = ("rating", "numberOfReviews")
+RAW_PHOTO_KEYS = ("contentUrl",)
+
+
+def _pick(value: Any, keys: Iterable[str]) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    return {key: value[key] for key in keys if key in value}
+
+
+def trimmed_capture(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the parsed fields of each search-result business only."""
+
+    trimmed: list[dict[str, Any]] = []
+    for business in _businesses(state):
+        item = _pick(business, RAW_BUSINESS_KEYS) or {}
+        for key, keys in (("contact", RAW_CONTACT_KEYS), ("statistic", RAW_STATISTIC_KEYS)):
+            picked = _pick(business.get(key), keys)
+            if picked is not None:
+                item[key] = picked
+        for key in ("mainPhoto", "defaultPhoto"):
+            picked = _pick(business.get(key), RAW_PHOTO_KEYS)
+            if picked:
+                item[key] = picked
+        trimmed.append(item)
+    return trimmed
+
+
+def _coordinate(value: Any, limit: float) -> float | str:
+    number = _number(value, minimum=-limit, maximum=limit)
+    # Compare with None: a real 0.0 coordinate must not become empty.
+    return "" if number is None else number
+
+
 def _number(value: Any, *, minimum: float, maximum: float) -> float | None:
     if isinstance(value, bool) or value in (None, ""):
         return None
@@ -293,8 +335,8 @@ def parse_html(
                 "city": _clean_text(city, 100),
                 "phone": _clean_text(contact.get("phoneno") or contact.get("callablePhoneno"), 80),
                 "homepage": _clean_text(contact.get("homepage"), 500),
-                "latitude": _number(business.get("lat"), minimum=-90, maximum=90) or "",
-                "longitude": _number(business.get("lng"), minimum=-180, maximum=180) or "",
+                "latitude": _coordinate(business.get("lat"), 90),
+                "longitude": _coordinate(business.get("lng"), 180),
                 "url": url,
                 "image_url": _image_url(business),
                 "verified_location": bool(business.get("verifiedLocation")),
@@ -348,7 +390,9 @@ def fetch_pages(
         page_url = build_page_url(normalized_source, page_number, page_size)
         response = polite_get(page_url, source=f"Wongnai page {page_number}", sleep=sleep)
         state, page_rows = parse_html(response.text, normalized_source, locations, page_number)
-        raw_pages.append({"page_number": page_number, "url": str(response.url), "html": response.text})
+        raw_pages.append(
+            {"page_number": page_number, "url": str(response.url), "businesses": trimmed_capture(state)}
+        )
         rows.extend(page_rows)
         if not _businesses(state):
             break

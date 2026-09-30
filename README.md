@@ -38,8 +38,12 @@ isolates jobs: a failing job is reported as `{"job": ..., "error":
 "<ExceptionClass>"}` and the exit code is 1.
 
 Rows keep only business contact data that Wongnai publishes for the venue
-(address, business phone, homepage). Raw page captures stay under the
-git-ignored `data/` directory.
+(address, business phone, homepage). The raw capture
+(`<stem>_raw.json`, under git-ignored `data/`) is no longer full page HTML: it
+keeps, per page, only the search-result business fields the parser reads
+(`trimmed_capture`), so review snippets, reviewer names and page/session state
+are never stored. `--max-pages` (1-5) and `--min-rows` (1-500) are validated
+before any request.
 
 ## Checks (offline)
 
