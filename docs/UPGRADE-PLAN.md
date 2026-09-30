@@ -2,7 +2,7 @@
 
 ## Current state
 
-Score: **7.5/10** (pass 1: 5 -> 7; pass 2: 7 -> 7.5) — one bounded,
+Score: **8/10** (pass 1: 5 -> 7; pass 2: 7 -> 7.5; pass 3: 7.5 -> 8) — one bounded,
 fixture-tested Wongnai adapter with polite fetching, job isolation, minimal raw
 captures, CLI bounds, lint and offline CI. Main gap: only one source exists.
 
@@ -20,6 +20,8 @@ captures, CLI bounds, lint and offline CI. Main gap: only one source exists.
 ### P2
 - Add a conditional GET/ETag cache to avoid refetching unchanged pages.
 - Document the downstream data product that consumes `data/exported/`.
+- Extract `http.py` + `atomic_io.py` into a shared package once a third repo
+  needs them (hand-synced with book-ecommerce-scraping today).
 
 ## Done in this pass (pass 1)
 - `restaurants/http.py`: identifying UA, 30 s timeout, bounded retry with
@@ -39,3 +41,12 @@ captures, CLI bounds, lint and offline CI. Main gap: only one source exists.
 - `run_restaurants.py`: `--max-pages` 1-5 and `--min-rows` 1-500 validated by
   argparse (exit 2 before any work); `main(argv)` is testable.
 - Tests 15 -> 20 (+4 subtests).
+
+## Done in this pass (pass 3)
+- `restaurants/http.py`: `Retry-After` HTTP-dates honoured (capped, never
+  negative; unparseable values fall back to backoff). Byte-identical to
+  book-ecommerce-scraping's copy except the UA; the sync rule is documented.
+- `restaurants/atomic_io.py`: raw JSON and snapshot CSV written atomically;
+  history "append" rewrites old + new atomically (no torn final row).
+- `run_restaurants.py` rejects an `--output-dir` that is an existing file.
+- Tests 20 -> 28 (+4 subtests).

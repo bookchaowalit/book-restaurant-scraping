@@ -98,6 +98,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--dry-run", action="store_true", help="Print the bounded job plan without collection or writes")
     args = parser.parse_args(argv)
+    if args.output_dir.exists() and not args.output_dir.is_dir():
+        parser.error(f"--output-dir is not a directory: {args.output_dir}")
     results = asyncio.run(run_restaurants(args.output_dir, args.max_pages, args.min_rows, dry_run=args.dry_run))
     if args.json:
         print(json.dumps(results, ensure_ascii=False))

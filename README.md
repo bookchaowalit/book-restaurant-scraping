@@ -31,11 +31,16 @@ Output stays in this repository's `data/exported/`.
 `restaurants/http.py` is the only network path: an identifying `User-Agent`
 (`book-restaurant-scraping/1.0`), a 30 s timeout, and at most three attempts
 with exponential backoff that retry only timeouts, connection errors, HTTP 429
-(honouring `Retry-After`, capped at 60 s) and 5xx; 403/404 fail at once.
+(honouring `Retry-After` as seconds or an HTTP-date, capped at 60 s) and
+5xx; 403/404 fail at once. The helper is kept identical to
+book-ecommerce-scraping's `ecommerce/http.py` apart from the User-Agent.
 `fetch_pages` waits 2 s between pages, is capped at 5 pages x 100 rows, and
 stops as soon as a page returns no results. `scripts/run_restaurants.py`
 isolates jobs: a failing job is reported as `{"job": ..., "error":
-"<ExceptionClass>"}` and the exit code is 1.
+"<ExceptionClass>"}` and the exit code is 1. Raw JSON, snapshot CSV and
+history CSV are written atomically (`restaurants/atomic_io.py`: temp file +
+fsync + `os.replace`), so a killed cron run never leaves a truncated export
+or a torn history row.
 
 Rows keep only business contact data that Wongnai publishes for the venue
 (address, business phone, homepage). The raw capture
