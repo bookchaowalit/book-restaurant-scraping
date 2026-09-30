@@ -149,5 +149,20 @@ class WongnaiScraperTests(unittest.TestCase):
         self.assertGreaterEqual(len(raw_pages[0]["businesses"]), len(rows))
 
 
+class TextNumberEdgeCaseTests(unittest.TestCase):
+    def test_infinite_review_count_does_not_crash(self):
+        from restaurants.wongnai_scraper import _integer
+
+        self.assertEqual(_integer(float("inf")), 0)
+        self.assertEqual(_integer(float("nan")), 0)
+        self.assertEqual(_integer("42"), 42)
+
+    def test_clean_text_drops_zero_width_characters(self):
+        from restaurants.wongnai_scraper import _clean_text
+
+        self.assertEqual(_clean_text("\u200bร้าน\u2060อาหาร \ufeff"), "ร้านอาหาร")
+        self.assertEqual(_clean_text("\u200b"), "")
+
+
 if __name__ == "__main__":
     unittest.main()

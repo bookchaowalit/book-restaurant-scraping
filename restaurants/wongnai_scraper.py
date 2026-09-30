@@ -98,8 +98,9 @@ def _utc_now() -> str:
 def _clean_text(value: Any, limit: int = 500) -> str:
     if isinstance(value, dict):
         value = value.get("primary") or value.get("name") or value.get("thai") or value.get("english")
-    text = str(value or "").strip()
-    return re.sub(r"\s+", " ", text)[:limit]
+    # Zero-width space / word joiner / BOM survive strip() and \s.
+    text = re.sub("[\u200b\u2060\ufeff]", "", str(value or ""))
+    return re.sub(r"\s+", " ", text).strip()[:limit]
 
 
 def _as_values(values: Iterable[str] | str | None, default: list[str]) -> list[str]:
@@ -244,7 +245,7 @@ def _integer(value: Any) -> int:
         return 0
     try:
         number = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # int(Infinity) overflows
         return 0
     return number if number >= 0 else 0
 

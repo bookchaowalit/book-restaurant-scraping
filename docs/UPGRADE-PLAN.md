@@ -50,3 +50,8 @@ captures, CLI bounds, lint and offline CI. Main gap: only one source exists.
   history "append" rewrites old + new atomically (no torn final row).
 - `run_restaurants.py` rejects an `--output-dir` that is an existing file.
 - Tests 20 -> 28 (+4 subtests).
+- Edge cases: `_integer` crashed the whole page parse on a JSON `Infinity`
+  review count (`int(inf)` raises `OverflowError`, which was not caught);
+  `_clean_text` kept zero-width space / word joiner / BOM, so a name made
+  only of them was not treated as empty; `_retry_after_seconds` crashed on
+  `Retry-After: ²` (`"²".isdigit()` is True). Regression tests added.
