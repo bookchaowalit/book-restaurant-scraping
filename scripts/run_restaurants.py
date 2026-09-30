@@ -14,8 +14,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from restaurants.wongnai_scraper import WongnaiScraper
-
 JOBS = (
     {
         "name": "wongnai_bangkok",
@@ -36,8 +34,25 @@ async def run_restaurants(
     output_dir: Path,
     max_pages: int = 3,
     min_rows: int = 20,
+    *,
+    dry_run: bool = False,
 ) -> list[dict[str, Any]]:
+    if dry_run:
+        return [
+            {
+                "job": job["name"],
+                "status": "dry-run",
+                "source_url": job["source_url"],
+                "max_pages": max_pages,
+                "min_rows": min_rows,
+                "network": "not-used",
+                "writes": "not-used",
+            }
+            for job in JOBS
+        ]
     results: list[dict[str, Any]] = []
+    from restaurants.wongnai_scraper import WongnaiScraper
+
     for job in JOBS:
         scraper = WongnaiScraper(
             locations=job["locations"],
@@ -59,8 +74,9 @@ def main() -> int:
     parser.add_argument("--min-rows", type=int, default=20)
     parser.add_argument("--output-dir", type=Path, default=ROOT / "data" / "exported")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--dry-run", action="store_true", help="Print the bounded job plan without collection or writes")
     args = parser.parse_args()
-    results = asyncio.run(run_restaurants(args.output_dir, args.max_pages, args.min_rows))
+    results = asyncio.run(run_restaurants(args.output_dir, args.max_pages, args.min_rows, dry_run=args.dry_run))
     if args.json:
         print(json.dumps(results, ensure_ascii=False))
     return 0
