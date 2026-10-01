@@ -13,20 +13,22 @@ ownership remains with the downstream data product.
 
 from __future__ import annotations
 
-import csv
 import json
 import math
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+import time
+from typing import Any, Callable, Iterable
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 try:
-    import httpx
     from bs4 import BeautifulSoup
 except ImportError as exc:  # pragma: no cover - requirements.txt supplies both
     raise RuntimeError("httpx and beautifulsoup4 are required for Wongnai capture") from exc
+
+from restaurants.atomic_io import append_csv_atomic, render_csv, write_text_atomic
+from restaurants.http import PAGE_DELAY_SECONDS, polite_get
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -96,8 +98,9 @@ def _utc_now() -> str:
 def _clean_text(value: Any, limit: int = 500) -> str:
     if isinstance(value, dict):
         value = value.get("primary") or value.get("name") or value.get("thai") or value.get("english")
-    text = str(value or "").strip()
-    return re.sub(r"\s+", " ", text)[:limit]
+    # Zero-width space / word joiner / BOM survive strip() and \s.
+    text = re.sub("[\u200b\u2060\ufeff]", "", str(value or ""))
+    return re.sub(r"\s+", " ", text).strip()[:limit]
 
 
 def _as_values(values: Iterable[str] | str | None, default: list[str]) -> list[str]:
@@ -183,6 +186,48 @@ def _businesses(state: dict[str, Any]) -> list[dict[str, Any]]:
     return [entry["business"] for entry in entries if isinstance(entry, dict) and isinstance(entry.get("business"), dict)]
 
 
+# Business keys kept in the raw capture: exactly what ``parse_html`` reads.
+# Everything else in ``window._wn`` (review snippets, reviewer names, ads,
+# session state) is dropped so raw files hold only the evidence we parse.
+RAW_BUSINESS_KEYS = (
+    "id", "displayName", "name", "nameOnly", "branch", "categories", "rating",
+    "priceRange", "lat", "lng", "rUrl", "url", "verifiedLocation",
+)
+RAW_CONTACT_KEYS = ("address", "phoneno", "callablePhoneno", "homepage")
+RAW_STATISTIC_KEYS = ("rating", "numberOfReviews")
+RAW_PHOTO_KEYS = ("contentUrl",)
+
+
+def _pick(value: Any, keys: Iterable[str]) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    return {key: value[key] for key in keys if key in value}
+
+
+def trimmed_capture(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the parsed fields of each search-result business only."""
+
+    trimmed: list[dict[str, Any]] = []
+    for business in _businesses(state):
+        item = _pick(business, RAW_BUSINESS_KEYS) or {}
+        for key, keys in (("contact", RAW_CONTACT_KEYS), ("statistic", RAW_STATISTIC_KEYS)):
+            picked = _pick(business.get(key), keys)
+            if picked is not None:
+                item[key] = picked
+        for key in ("mainPhoto", "defaultPhoto"):
+            picked = _pick(business.get(key), RAW_PHOTO_KEYS)
+            if picked:
+                item[key] = picked
+        trimmed.append(item)
+    return trimmed
+
+
+def _coordinate(value: Any, limit: float) -> float | str:
+    number = _number(value, minimum=-limit, maximum=limit)
+    # Compare with None: a real 0.0 coordinate must not become empty.
+    return "" if number is None else number
+
+
 def _number(value: Any, *, minimum: float, maximum: float) -> float | None:
     if isinstance(value, bool) or value in (None, ""):
         return None
@@ -200,7 +245,7 @@ def _integer(value: Any) -> int:
         return 0
     try:
         number = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # int(Infinity) overflows
         return 0
     return number if number >= 0 else 0
 
@@ -291,8 +336,8 @@ def parse_html(
                 "city": _clean_text(city, 100),
                 "phone": _clean_text(contact.get("phoneno") or contact.get("callablePhoneno"), 80),
                 "homepage": _clean_text(contact.get("homepage"), 500),
-                "latitude": _number(business.get("lat"), minimum=-90, maximum=90) or "",
-                "longitude": _number(business.get("lng"), minimum=-180, maximum=180) or "",
+                "latitude": _coordinate(business.get("lat"), 90),
+                "longitude": _coordinate(business.get("lng"), 180),
                 "url": url,
                 "image_url": _image_url(business),
                 "verified_location": bool(business.get("verifiedLocation")),
@@ -324,7 +369,15 @@ def fetch_pages(
     max_pages: int,
     page_size: int,
     min_rows: int = MIN_ROWS,
+    *,
+    page_delay: float = PAGE_DELAY_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Fetch up to ``max_pages`` pages politely.
+
+    Pages are spaced by ``page_delay`` seconds and collection stops early once
+    a page has no search results, so an exhausted listing is not re-requested.
+    """
     if isinstance(max_pages, bool) or not isinstance(max_pages, int) or not 1 <= max_pages <= MAX_PAGES:
         raise ValueError(f"max_pages must be an integer from 1 to {MAX_PAGES}")
     if isinstance(min_rows, bool) or not isinstance(min_rows, int) or not 1 <= min_rows <= MAX_ROWS:
@@ -333,22 +386,17 @@ def fetch_pages(
     raw_pages: list[dict[str, Any]] = []
     rows: list[dict[str, Any]] = []
     for page_number in range(1, max_pages + 1):
+        if page_number > 1 and page_delay > 0:
+            sleep(page_delay)
         page_url = build_page_url(normalized_source, page_number, page_size)
-        response = httpx.get(
-            page_url,
-            headers={
-                "User-Agent": "book-job-scraping/1.0",
-                "Accept": "text/html,application/xhtml+xml",
-            },
-            timeout=30,
-            follow_redirects=True,
+        response = polite_get(page_url, source=f"Wongnai page {page_number}", sleep=sleep)
+        state, page_rows = parse_html(response.text, normalized_source, locations, page_number)
+        raw_pages.append(
+            {"page_number": page_number, "url": str(response.url), "businesses": trimmed_capture(state)}
         )
-        response.raise_for_status()
-        if not response.content:
-            raise ValueError(f"Wongnai page {page_number} response is empty")
-        _, page_rows = parse_html(response.text, normalized_source, locations, page_number)
-        raw_pages.append({"page_number": page_number, "url": str(response.url), "html": response.text})
         rows.extend(page_rows)
+        if not _businesses(state):
+            break
     rows = _dedupe_rows(rows)[:MAX_ROWS]
     if len(rows) < min_rows:
         raise ValueError(f"Wongnai capture produced only {len(rows)} location-matched restaurants; need at least {min_rows}")
@@ -356,33 +404,20 @@ def fetch_pages(
 
 
 def write_raw(raw_pages: list[dict[str, Any]], output_dir: Path, stem: str) -> Path:
-    output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"{stem}_raw.json"
-    path.write_text(json.dumps(raw_pages, ensure_ascii=False), encoding="utf-8")
+    write_text_atomic(path, json.dumps(raw_pages, ensure_ascii=False))
     return path
 
 
 def write_snapshot(rows: list[dict[str, Any]], captured_at: str, output_dir: Path, stem: str) -> Path:
-    output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"{stem}.csv"
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=SNAPSHOT_FIELDS, extrasaction="ignore")
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({**row, "captured_at": captured_at})
+    write_text_atomic(path, render_csv(({**row, "captured_at": captured_at} for row in rows), SNAPSHOT_FIELDS))
     return path
 
 
 def append_history(rows: list[dict[str, Any]], captured_at: str, output_dir: Path, stem: str) -> Path:
-    output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"{stem}_history.csv"
-    exists = path.exists()
-    with path.open("a", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=HISTORY_FIELDS, extrasaction="ignore")
-        if not exists:
-            writer.writeheader()
-        for row in rows:
-            writer.writerow({**row, "captured_at": captured_at})
+    append_csv_atomic(path, ({**row, "captured_at": captured_at} for row in rows), HISTORY_FIELDS)
     return path
 
 
