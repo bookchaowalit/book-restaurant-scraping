@@ -1,0 +1,8 @@
+system_id: bookchaowalit/book-apps/tools/book-restaurant-scraping
+prefix: CARD
+brand: "BOOK RESTAURANT SCRAPING"
+subtitle: "ต้นแบบเก็บรายการร้านอาหารจาก Wongnai แบบสุภาพและไม่เก็บข้อมูลส่วนบุคคล"
+footer: "Book Restaurant Scraping — Product Card"
+color: "#2f4b6e"
+audience: internal
+tier: L0
