@@ -1,7 +1,7 @@
 # book-restaurant-scraping
 
 **Tier:** C / tool prototype (portfolio breadth, not interview flagship)  
-**Owner path:** `bookchaowalit/book-apps/tools/book-restaurant-scraping`
+**Owner path:** `bookchaowalit/book-apps/tools/food-restaurant-scraper`
 
 ## Purpose
 
