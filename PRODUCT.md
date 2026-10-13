@@ -1,6 +1,6 @@
 # book-restaurant-scraping — Product brief
 
-**Slug:** `bookchaowalit/book-restaurant-scraping`  
+**Slug:** `bookchaowalit/food-restaurant-scraper`  
 **Generated:** 2026-08-11 (bulk Book Dev closeout)  
 **Status:** collection adapter present; this repo can schedule Wongnai via `setup_cron.sh`
 
