@@ -68,6 +68,20 @@ Tests replay `tests/fixtures/` and mock the HTTP layer; CI
 - **Not** coupled to Solo Empire monorepo runtime. Nested Git repo; commit only inside this tree.
 - Never commit `.env`, cookies, session dumps, or scraped PII dumps to Git.
 
+## Source terms decision (2026-10-15)
+
+**Wongnai: rejected by the owner on 2026-10-15 (BOO-130).** Wongnai terms
+section 2(3) bars collecting restaurant information, location/maps, user data
+and images for any purpose without written Wongnai permission; sections 5 and
+11.4 reserve IP and limit personal-data use. A working smoke test is not
+permission. Do not run live Wongnai collection or activate the weekly cron;
+`restaurant.v1` stays non-approved and the coverage registry marks restaurant
+permission `blocked`. Offline synthetic fixtures and tests are unaffected.
+Reopening requires written permission covering venue metadata, storage/history
+and downstream API exposure, or a separately licensed source. This is an owner
+decision based on the published terms, not legal advice. Record: [architecture-docs `systems/ai-data/source-terms-decisions-2026-10-15.md`](https://github.com/bookchaowalit/architecture-docs/blob/main/systems/ai-data/source-terms-decisions-2026-10-15.md).
+Source: [Wongnai terms](https://www.wongnai.com/terms?locale=en).
+
 ## Limitations (honest)
 
 Prototype only. Respect ToS. Not a consumer app backend.
