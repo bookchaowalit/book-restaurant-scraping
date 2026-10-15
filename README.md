@@ -3,6 +3,8 @@
 **Tier:** C / tool prototype (portfolio breadth, not interview flagship)  
 **Owner path:** `bookchaowalit/book-apps/tools/book-restaurant-scraping`
 
+> **Source terms (2026-10-15):** Wongnai was rejected by the owner; live collection and the weekly cron below are not approved. Offline fixtures/tests only. See [Source terms decision](#source-terms-decision-2026-10-15).
+
 ## Purpose
 
 Restaurant listing scrape prototype (Wongnai-style module).
@@ -20,8 +22,9 @@ Python
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-python3 scripts/run_restaurants.py --max-pages 3 --min-rows 20
-bash setup_cron.sh install   # optional; weekly Sunday 00:15
+# Live Wongnai collection and cron are NOT approved (owner decision 2026-10-15):
+# python3 scripts/run_restaurants.py --max-pages 3 --min-rows 20
+# bash setup_cron.sh install
 ```
 
 Output stays in this repository's `data/exported/`.
@@ -74,12 +77,12 @@ Tests replay `tests/fixtures/` and mock the HTTP layer; CI
 section 2(3) bars collecting restaurant information, location/maps, user data
 and images for any purpose without written Wongnai permission; sections 5 and
 11.4 reserve IP and limit personal-data use. A working smoke test is not
-permission. Do not run live Wongnai collection or activate the weekly cron;
+permission. Do not run live Wongnai collection or activate the weekly cron (policy, not enforced in code);
 `restaurant.v1` stays non-approved and the coverage registry marks restaurant
 permission `blocked`. Offline synthetic fixtures and tests are unaffected.
 Reopening requires written permission covering venue metadata, storage/history
 and downstream API exposure, or a separately licensed source. This is an owner
-decision based on the published terms, not legal advice. Record: [architecture-docs `systems/ai-data/source-terms-decisions-2026-10-15.md`](https://github.com/bookchaowalit/architecture-docs/blob/main/systems/ai-data/source-terms-decisions-2026-10-15.md).
+decision based on the published terms, not legal advice. Record: architecture-docs `systems/ai-data/source-terms-decisions-2026-10-15.md` (private repository).
 Source: [Wongnai terms](https://www.wongnai.com/terms?locale=en).
 
 ## Limitations (honest)
