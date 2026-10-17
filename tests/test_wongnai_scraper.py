@@ -45,7 +45,12 @@ class WongnaiScraperTests(unittest.TestCase):
         self.assertEqual(rows[0]["price_range_value"], 2)
         self.assertEqual(rows[0]["page_number"], 2)
         self.assertTrue(all(row["location"] == "bangkok" for row in rows))
-        self.assertTrue(all(row["url"].startswith("https://www.wongnai.com/restaurants/") for row in rows))
+        self.assertTrue(
+            all(
+                row["url"].startswith("https://www.wongnai.com/restaurants/")
+                for row in rows
+            )
+        )
         self.assertFalse(any("Chiang" in row["name"] for row in rows))
 
     def test_canonical_and_page_urls_strip_tracking_and_bound_pagination(self):
@@ -74,7 +79,14 @@ class WongnaiScraperTests(unittest.TestCase):
         sleeps: list[float] = []
         pages = [_page(self.html), _page(EMPTY_PAGE), _page(self.html)]
         with patch("restaurants.http.httpx.get", side_effect=pages) as get:
-            raw_pages, rows = fetch_pages(SOURCE, ["bangkok"], max_pages=3, page_size=100, min_rows=1, sleep=sleeps.append)
+            raw_pages, rows = fetch_pages(
+                SOURCE,
+                ["bangkok"],
+                max_pages=3,
+                page_size=100,
+                min_rows=1,
+                sleep=sleeps.append,
+            )
         self.assertEqual(get.call_count, 2)
         self.assertEqual(sleeps, [2.0])
         self.assertEqual(len(raw_pages), 2)
@@ -83,11 +95,25 @@ class WongnaiScraperTests(unittest.TestCase):
     def test_fetch_pages_deduplicates_across_pages_and_enforces_min_rows(self):
         pages = [_page(self.html), _page(self.html)]
         with patch("restaurants.http.httpx.get", side_effect=pages):
-            _raw, rows = fetch_pages(SOURCE, ["bangkok"], max_pages=2, page_size=100, min_rows=1, sleep=lambda _s: None)
+            _raw, rows = fetch_pages(
+                SOURCE,
+                ["bangkok"],
+                max_pages=2,
+                page_size=100,
+                min_rows=1,
+                sleep=lambda _s: None,
+            )
         self.assertEqual(len(rows), 2)
         with patch("restaurants.http.httpx.get", side_effect=[_page(self.html)]):
             with self.assertRaises(ValueError):
-                fetch_pages(SOURCE, ["bangkok"], max_pages=1, page_size=100, min_rows=5, sleep=lambda _s: None)
+                fetch_pages(
+                    SOURCE,
+                    ["bangkok"],
+                    max_pages=1,
+                    page_size=100,
+                    min_rows=5,
+                    sleep=lambda _s: None,
+                )
 
     def test_fetch_pages_rejects_unbounded_page_counts(self):
         for bad in (0, 6, True):
@@ -101,7 +127,7 @@ class WongnaiScraperTests(unittest.TestCase):
             '{"business": {"id": "77", "displayName": "No city"}},'
             '{"business": {"id": "78", "displayName": "Ok", "rUrl": "/restaurants/78-ok",'
             ' "rating": "NaN", "lat": 999, "contact": {"address": {"city": {"id": 1}}}}}'
-            ']}}}}</script>'
+            "]}}}}</script>"
         )
         _state, rows = parse_html(html, SOURCE, ["bangkok"])
         self.assertEqual([row["restaurant_id"] for row in rows], ["78"])
@@ -113,7 +139,7 @@ class WongnaiScraperTests(unittest.TestCase):
             '<script>window._wn = {"store": {"searchResult": {"value": {"data": ['
             '{"business": {"id": "5", "displayName": "Equator", "rUrl": "/restaurants/5-eq",'
             ' "lat": 0, "lng": 0.0, "contact": {"address": {"city": {"id": 1}}}}}'
-            ']}}}}</script>'
+            "]}}}}</script>"
         )
         _state, rows = parse_html(html, SOURCE, ["bangkok"])
         self.assertEqual((rows[0]["latitude"], rows[0]["longitude"]), (0.0, 0.0))
@@ -121,30 +147,66 @@ class WongnaiScraperTests(unittest.TestCase):
     def test_raw_capture_keeps_only_parsed_business_fields(self):
         state = {
             "session": {"token": "t"},
-            "store": {"searchResult": {"value": {"data": [{
-                "business": {
-                    "id": 9, "displayName": "Cafe", "rUrl": "/restaurants/9-cafe",
-                    "lat": 13.7, "lng": 100.5,
-                    "contact": {"address": {"city": {"id": 1}}, "phoneno": "02", "email": "x@y.z"},
-                    "statistic": {"numberOfReviews": 3, "rating": 4.1, "topReviewer": "Somchai"},
-                    "mainPhoto": {"contentUrl": "https://img/x.jpg", "uploader": "Somchai"},
-                    "review": {"text": "great", "user": {"name": "Somchai"}},
-                },
-                "highlight": "user text",
-            }]}}},
+            "store": {
+                "searchResult": {
+                    "value": {
+                        "data": [
+                            {
+                                "business": {
+                                    "id": 9,
+                                    "displayName": "Cafe",
+                                    "rUrl": "/restaurants/9-cafe",
+                                    "lat": 13.7,
+                                    "lng": 100.5,
+                                    "contact": {
+                                        "address": {"city": {"id": 1}},
+                                        "phoneno": "02",
+                                        "email": "x@y.z",
+                                    },
+                                    "statistic": {
+                                        "numberOfReviews": 3,
+                                        "rating": 4.1,
+                                        "topReviewer": "Somchai",
+                                    },
+                                    "mainPhoto": {
+                                        "contentUrl": "https://img/x.jpg",
+                                        "uploader": "Somchai",
+                                    },
+                                    "review": {
+                                        "text": "great",
+                                        "user": {"name": "Somchai"},
+                                    },
+                                },
+                                "highlight": "user text",
+                            }
+                        ]
+                    }
+                }
+            },
         }
         trimmed = trimmed_capture(state)
-        self.assertEqual(trimmed, [{
-            "id": 9, "displayName": "Cafe", "rUrl": "/restaurants/9-cafe", "lat": 13.7, "lng": 100.5,
-            "contact": {"address": {"city": {"id": 1}}, "phoneno": "02"},
-            "statistic": {"rating": 4.1, "numberOfReviews": 3},
-            "mainPhoto": {"contentUrl": "https://img/x.jpg"},
-        }])
+        self.assertEqual(
+            trimmed,
+            [
+                {
+                    "id": 9,
+                    "displayName": "Cafe",
+                    "rUrl": "/restaurants/9-cafe",
+                    "lat": 13.7,
+                    "lng": 100.5,
+                    "contact": {"address": {"city": {"id": 1}}, "phoneno": "02"},
+                    "statistic": {"rating": 4.1, "numberOfReviews": 3},
+                    "mainPhoto": {"contentUrl": "https://img/x.jpg"},
+                }
+            ],
+        )
         self.assertNotIn("Somchai", repr(trimmed))
 
     def test_fetch_pages_raw_capture_has_no_page_html(self):
         with patch("restaurants.http.httpx.get", side_effect=[_page(self.html)]):
-            raw_pages, rows = fetch_pages(SOURCE, ["bangkok"], max_pages=1, page_size=100, min_rows=1)
+            raw_pages, rows = fetch_pages(
+                SOURCE, ["bangkok"], max_pages=1, page_size=100, min_rows=1
+            )
         self.assertNotIn("html", raw_pages[0])
         self.assertGreaterEqual(len(raw_pages[0]["businesses"]), len(rows))
 

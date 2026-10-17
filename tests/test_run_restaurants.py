@@ -42,7 +42,12 @@ class RunRestaurantsTests(unittest.TestCase):
         self.assertEqual(result[1]["count"], 7)
 
     def test_cli_rejects_out_of_range_values_before_any_work(self):
-        for argv in (["--max-pages", "0"], ["--max-pages", "6"], ["--min-rows", "0"], ["--min-rows", "x"]):
+        for argv in (
+            ["--max-pages", "0"],
+            ["--max-pages", "6"],
+            ["--min-rows", "0"],
+            ["--min-rows", "x"],
+        ):
             with self.subTest(argv=argv), patch("sys.stderr"):
                 with self.assertRaises(SystemExit) as ctx:
                     main([*argv, "--dry-run"])
@@ -50,7 +55,10 @@ class RunRestaurantsTests(unittest.TestCase):
 
     def test_cli_dry_run_accepts_bounds(self):
         with patch("sys.stdout"):
-            self.assertEqual(main(["--max-pages", "5", "--min-rows", "500", "--dry-run", "--json"]), 0)
+            self.assertEqual(
+                main(["--max-pages", "5", "--min-rows", "500", "--dry-run", "--json"]),
+                0,
+            )
 
 
 if __name__ == "__main__":

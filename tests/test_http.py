@@ -12,8 +12,15 @@ from restaurants.http import USER_AGENT, FetchError, _retry_after_seconds, polit
 URL = "https://site.example/page"
 
 
-def _response(status: int, content: bytes = b"<html></html>", headers=None) -> httpx.Response:
-    return httpx.Response(status, content=content, headers=headers or {}, request=httpx.Request("GET", URL))
+def _response(
+    status: int, content: bytes = b"<html></html>", headers=None
+) -> httpx.Response:
+    return httpx.Response(
+        status,
+        content=content,
+        headers=headers or {},
+        request=httpx.Request("GET", URL),
+    )
 
 
 class PoliteGetTests(unittest.TestCase):
@@ -26,7 +33,11 @@ class PoliteGetTests(unittest.TestCase):
 
     def test_retries_transient_status_honouring_retry_after(self):
         sleeps: list[float] = []
-        responses = [_response(503), _response(429, headers={"Retry-After": "5"}), _response(200)]
+        responses = [
+            _response(503),
+            _response(429, headers={"Retry-After": "5"}),
+            _response(200),
+        ]
         with patch("restaurants.http.httpx.get", side_effect=responses) as get:
             polite_get(URL, source="Demo", sleep=sleeps.append)
         self.assertEqual(get.call_count, 3)
@@ -34,7 +45,9 @@ class PoliteGetTests(unittest.TestCase):
 
     def test_gives_up_after_bounded_timeouts(self):
         sleeps: list[float] = []
-        with patch("restaurants.http.httpx.get", side_effect=httpx.ConnectTimeout("slow")) as get:
+        with patch(
+            "restaurants.http.httpx.get", side_effect=httpx.ConnectTimeout("slow")
+        ) as get:
             with self.assertRaises(FetchError):
                 polite_get(URL, source="Demo", attempts=3, sleep=sleeps.append)
         self.assertEqual(get.call_count, 3)
@@ -52,18 +65,26 @@ class PoliteGetTests(unittest.TestCase):
         with patch("restaurants.http.httpx.get", side_effect=responses):
             polite_get(URL, source="Demo", sleep=sleeps.append)
         self.assertEqual(sleeps, [60.0])
-        with patch("restaurants.http.httpx.get", return_value=_response(200, content=b"")):
+        with patch(
+            "restaurants.http.httpx.get", return_value=_response(200, content=b"")
+        ):
             with self.assertRaises(ValueError):
                 polite_get(URL, source="Demo", sleep=lambda _s: None)
 
     def test_retry_after_http_date_is_honoured_and_capped(self):
         now = lambda: datetime(2026, 9, 30, 12, 0, 0, tzinfo=timezone.utc)  # noqa: E731
         date = {"Retry-After": "Wed, 30 Sep 2026 12:00:07 GMT"}
-        self.assertEqual(_retry_after_seconds(_response(503, headers=date), 2.0, now), 7.0)
+        self.assertEqual(
+            _retry_after_seconds(_response(503, headers=date), 2.0, now), 7.0
+        )
         far = {"Retry-After": "Thu, 01 Oct 2026 12:00:00 GMT"}
-        self.assertEqual(_retry_after_seconds(_response(503, headers=far), 2.0, now), 60.0)
+        self.assertEqual(
+            _retry_after_seconds(_response(503, headers=far), 2.0, now), 60.0
+        )
         past = {"Retry-After": "Tue, 29 Sep 2026 12:00:00 GMT"}
-        self.assertEqual(_retry_after_seconds(_response(503, headers=past), 2.0, now), 0.0)
+        self.assertEqual(
+            _retry_after_seconds(_response(503, headers=past), 2.0, now), 0.0
+        )
 
     def test_unparseable_retry_after_falls_back_to_backoff(self):
         # b"\xb2" decodes (latin-1) to "²", which str.isdigit() accepts.
