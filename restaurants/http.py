@@ -79,7 +79,9 @@ def polite_get(
     for attempt in range(1, attempts + 1):
         delay = backoff * (2 ** (attempt - 1))
         try:
-            response = httpx.get(url, headers=headers, timeout=timeout, follow_redirects=True)
+            response = httpx.get(
+                url, headers=headers, timeout=timeout, follow_redirects=True
+            )
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             last_error = type(exc).__name__
         else:
@@ -89,7 +91,10 @@ def polite_get(
                 delay = _retry_after_seconds(response, delay)
             else:
                 response.raise_for_status()
-                if not (getattr(response, "content", None) or getattr(response, "text", None)):
+                if not (
+                    getattr(response, "content", None)
+                    or getattr(response, "text", None)
+                ):
                     raise ValueError(f"{source} response is empty")
                 return response
         if attempt < attempts:

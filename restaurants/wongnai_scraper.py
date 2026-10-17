@@ -25,7 +25,9 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 try:
     from bs4 import BeautifulSoup
 except ImportError as exc:  # pragma: no cover - requirements.txt supplies both
-    raise RuntimeError("httpx and beautifulsoup4 are required for Wongnai capture") from exc
+    raise RuntimeError(
+        "httpx and beautifulsoup4 are required for Wongnai capture"
+    ) from exc
 
 from restaurants.atomic_io import append_csv_atomic, render_csv, write_text_atomic
 from restaurants.http import PAGE_DELAY_SECONDS, polite_get
@@ -92,12 +94,22 @@ HISTORY_FIELDS = [
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 
 def _clean_text(value: Any, limit: int = 500) -> str:
     if isinstance(value, dict):
-        value = value.get("primary") or value.get("name") or value.get("thai") or value.get("english")
+        value = (
+            value.get("primary")
+            or value.get("name")
+            or value.get("thai")
+            or value.get("english")
+        )
     # Zero-width space / word joiner / BOM survive strip() and \s.
     text = re.sub("[\u200b\u2060\ufeff]", "", str(value or ""))
     return re.sub(r"\s+", " ", text).strip()[:limit]
@@ -130,21 +142,49 @@ def normalize_source_url(value: str = SOURCE_URL) -> str:
     parts = urlsplit(str(value).strip())
     host = (parts.hostname or "").lower()
     path = parts.path.rstrip("/") or "/"
-    if parts.scheme.lower() != "https" or not ALLOWED_HOST.fullmatch(host) or path != "/restaurants":
+    if (
+        parts.scheme.lower() != "https"
+        or not ALLOWED_HOST.fullmatch(host)
+        or path != "/restaurants"
+    ):
         raise ValueError("Wongnai source URL must be an HTTPS /restaurants page")
     query = urlencode(parse_qsl(parts.query, keep_blank_values=True))
     return urlunsplit(("https", host, path, query, ""))
 
 
-def build_page_url(source_url: str, page_number: int, page_size: int = DEFAULT_PAGE_SIZE) -> str:
-    if isinstance(page_number, bool) or not isinstance(page_number, int) or page_number < 1:
+def build_page_url(
+    source_url: str, page_number: int, page_size: int = DEFAULT_PAGE_SIZE
+) -> str:
+    if (
+        isinstance(page_number, bool)
+        or not isinstance(page_number, int)
+        or page_number < 1
+    ):
         raise ValueError("page_number must be a positive integer")
-    if isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= MAX_PAGE_SIZE:
+    if (
+        isinstance(page_size, bool)
+        or not isinstance(page_size, int)
+        or not 1 <= page_size <= MAX_PAGE_SIZE
+    ):
         raise ValueError(f"page_size must be an integer from 1 to {MAX_PAGE_SIZE}")
     base = normalize_source_url(source_url)
     query = dict(parse_qsl(urlsplit(base).query, keep_blank_values=True))
-    query.update({"page.number": str(page_number), "page.size": str(page_size), "rerank": "false"})
-    return urlunsplit(("https", urlsplit(base).hostname or "www.wongnai.com", "/restaurants", urlencode(query), ""))
+    query.update(
+        {
+            "page.number": str(page_number),
+            "page.size": str(page_size),
+            "rerank": "false",
+        }
+    )
+    return urlunsplit(
+        (
+            "https",
+            urlsplit(base).hostname or "www.wongnai.com",
+            "/restaurants",
+            urlencode(query),
+            "",
+        )
+    )
 
 
 def canonical_url(value: str) -> str:
@@ -179,19 +219,36 @@ def _window_state(html: str) -> dict[str, Any]:
 
 def _businesses(state: dict[str, Any]) -> list[dict[str, Any]]:
     store = state.get("store")
-    value = store.get("searchResult", {}).get("value") if isinstance(store, dict) else None
+    value = (
+        store.get("searchResult", {}).get("value") if isinstance(store, dict) else None
+    )
     entries = value.get("data") if isinstance(value, dict) else None
     if not isinstance(entries, list):
         raise ValueError("Wongnai page is missing searchResult data")
-    return [entry["business"] for entry in entries if isinstance(entry, dict) and isinstance(entry.get("business"), dict)]
+    return [
+        entry["business"]
+        for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("business"), dict)
+    ]
 
 
 # Business keys kept in the raw capture: exactly what ``parse_html`` reads.
 # Everything else in ``window._wn`` (review snippets, reviewer names, ads,
 # session state) is dropped so raw files hold only the evidence we parse.
 RAW_BUSINESS_KEYS = (
-    "id", "displayName", "name", "nameOnly", "branch", "categories", "rating",
-    "priceRange", "lat", "lng", "rUrl", "url", "verifiedLocation",
+    "id",
+    "displayName",
+    "name",
+    "nameOnly",
+    "branch",
+    "categories",
+    "rating",
+    "priceRange",
+    "lat",
+    "lng",
+    "rUrl",
+    "url",
+    "verifiedLocation",
 )
 RAW_CONTACT_KEYS = ("address", "phoneno", "callablePhoneno", "homepage")
 RAW_STATISTIC_KEYS = ("rating", "numberOfReviews")
@@ -210,7 +267,10 @@ def trimmed_capture(state: dict[str, Any]) -> list[dict[str, Any]]:
     trimmed: list[dict[str, Any]] = []
     for business in _businesses(state):
         item = _pick(business, RAW_BUSINESS_KEYS) or {}
-        for key, keys in (("contact", RAW_CONTACT_KEYS), ("statistic", RAW_STATISTIC_KEYS)):
+        for key, keys in (
+            ("contact", RAW_CONTACT_KEYS),
+            ("statistic", RAW_STATISTIC_KEYS),
+        ):
             picked = _pick(business.get(key), keys)
             if picked is not None:
                 item[key] = picked
@@ -262,7 +322,14 @@ def _location_matches(address: dict[str, Any], location: str) -> bool:
         return False
     if location == "bangkok" and city.get("id") == 1:
         return True
-    names = {_clean_text(value).casefold() for value in (city.get("name"), address.get("district"), address.get("subDistrict"))}
+    names = {
+        _clean_text(value).casefold()
+        for value in (
+            city.get("name"),
+            address.get("district"),
+            address.get("subDistrict"),
+        )
+    }
     return bool(names & {alias.casefold() for alias in LOCATION_ALIASES[location]})
 
 
@@ -300,26 +367,60 @@ def parse_html(
     seen_ids: set[str] = set()
     for business in _businesses(state):
         restaurant_id = str(business.get("id") or "").strip()
-        if not restaurant_id.isdigit() or int(restaurant_id) <= 0 or restaurant_id in seen_ids:
+        if (
+            not restaurant_id.isdigit()
+            or int(restaurant_id) <= 0
+            or restaurant_id in seen_ids
+        ):
             continue
         address = _address(business)
-        location = next((value for value in requested_locations if _location_matches(address, value)), None)
+        location = next(
+            (
+                value
+                for value in requested_locations
+                if _location_matches(address, value)
+            ),
+            None,
+        )
         if location is None:
             continue
-        name = _clean_text(business.get("displayName") or business.get("name") or business.get("nameOnly"), 300)
+        name = _clean_text(
+            business.get("displayName")
+            or business.get("name")
+            or business.get("nameOnly"),
+            300,
+        )
         if not name:
             continue
         try:
             url = canonical_url(business.get("rUrl") or business.get("url") or "")
         except ValueError:
             continue
-        price_range = business.get("priceRange") if isinstance(business.get("priceRange"), dict) else {}
-        contact = business.get("contact") if isinstance(business.get("contact"), dict) else {}
-        statistic = business.get("statistic") if isinstance(business.get("statistic"), dict) else {}
+        price_range = (
+            business.get("priceRange")
+            if isinstance(business.get("priceRange"), dict)
+            else {}
+        )
+        contact = (
+            business.get("contact") if isinstance(business.get("contact"), dict) else {}
+        )
+        statistic = (
+            business.get("statistic")
+            if isinstance(business.get("statistic"), dict)
+            else {}
+        )
         city = address.get("city") if isinstance(address.get("city"), dict) else {}
-        district = address.get("district") if isinstance(address.get("district"), dict) else {}
-        subdistrict = address.get("subDistrict") if isinstance(address.get("subDistrict"), dict) else {}
-        rating = _number(business.get("rating") or statistic.get("rating"), minimum=0, maximum=5)
+        district = (
+            address.get("district") if isinstance(address.get("district"), dict) else {}
+        )
+        subdistrict = (
+            address.get("subDistrict")
+            if isinstance(address.get("subDistrict"), dict)
+            else {}
+        )
+        rating = _number(
+            business.get("rating") or statistic.get("rating"), minimum=0, maximum=5
+        )
         rows.append(
             {
                 "restaurant_id": restaurant_id,
@@ -334,7 +435,9 @@ def parse_html(
                 "district": _clean_text(district, 100),
                 "subdistrict": _clean_text(subdistrict, 100),
                 "city": _clean_text(city, 100),
-                "phone": _clean_text(contact.get("phoneno") or contact.get("callablePhoneno"), 80),
+                "phone": _clean_text(
+                    contact.get("phoneno") or contact.get("callablePhoneno"), 80
+                ),
                 "homepage": _clean_text(contact.get("homepage"), 500),
                 "latitude": _coordinate(business.get("lat"), 90),
                 "longitude": _coordinate(business.get("lng"), 180),
@@ -378,9 +481,17 @@ def fetch_pages(
     Pages are spaced by ``page_delay`` seconds and collection stops early once
     a page has no search results, so an exhausted listing is not re-requested.
     """
-    if isinstance(max_pages, bool) or not isinstance(max_pages, int) or not 1 <= max_pages <= MAX_PAGES:
+    if (
+        isinstance(max_pages, bool)
+        or not isinstance(max_pages, int)
+        or not 1 <= max_pages <= MAX_PAGES
+    ):
         raise ValueError(f"max_pages must be an integer from 1 to {MAX_PAGES}")
-    if isinstance(min_rows, bool) or not isinstance(min_rows, int) or not 1 <= min_rows <= MAX_ROWS:
+    if (
+        isinstance(min_rows, bool)
+        or not isinstance(min_rows, int)
+        or not 1 <= min_rows <= MAX_ROWS
+    ):
         raise ValueError(f"min_rows must be an integer from 1 to {MAX_ROWS}")
     normalized_source = normalize_source_url(source_url)
     raw_pages: list[dict[str, Any]] = []
@@ -389,17 +500,27 @@ def fetch_pages(
         if page_number > 1 and page_delay > 0:
             sleep(page_delay)
         page_url = build_page_url(normalized_source, page_number, page_size)
-        response = polite_get(page_url, source=f"Wongnai page {page_number}", sleep=sleep)
-        state, page_rows = parse_html(response.text, normalized_source, locations, page_number)
+        response = polite_get(
+            page_url, source=f"Wongnai page {page_number}", sleep=sleep
+        )
+        state, page_rows = parse_html(
+            response.text, normalized_source, locations, page_number
+        )
         raw_pages.append(
-            {"page_number": page_number, "url": str(response.url), "businesses": trimmed_capture(state)}
+            {
+                "page_number": page_number,
+                "url": str(response.url),
+                "businesses": trimmed_capture(state),
+            }
         )
         rows.extend(page_rows)
         if not _businesses(state):
             break
     rows = _dedupe_rows(rows)[:MAX_ROWS]
     if len(rows) < min_rows:
-        raise ValueError(f"Wongnai capture produced only {len(rows)} location-matched restaurants; need at least {min_rows}")
+        raise ValueError(
+            f"Wongnai capture produced only {len(rows)} location-matched restaurants; need at least {min_rows}"
+        )
     return raw_pages, rows
 
 
@@ -409,15 +530,26 @@ def write_raw(raw_pages: list[dict[str, Any]], output_dir: Path, stem: str) -> P
     return path
 
 
-def write_snapshot(rows: list[dict[str, Any]], captured_at: str, output_dir: Path, stem: str) -> Path:
+def write_snapshot(
+    rows: list[dict[str, Any]], captured_at: str, output_dir: Path, stem: str
+) -> Path:
     path = output_dir / f"{stem}.csv"
-    write_text_atomic(path, render_csv(({**row, "captured_at": captured_at} for row in rows), SNAPSHOT_FIELDS))
+    write_text_atomic(
+        path,
+        render_csv(
+            ({**row, "captured_at": captured_at} for row in rows), SNAPSHOT_FIELDS
+        ),
+    )
     return path
 
 
-def append_history(rows: list[dict[str, Any]], captured_at: str, output_dir: Path, stem: str) -> Path:
+def append_history(
+    rows: list[dict[str, Any]], captured_at: str, output_dir: Path, stem: str
+) -> Path:
     path = output_dir / f"{stem}_history.csv"
-    append_csv_atomic(path, ({**row, "captured_at": captured_at} for row in rows), HISTORY_FIELDS)
+    append_csv_atomic(
+        path, ({**row, "captured_at": captured_at} for row in rows), HISTORY_FIELDS
+    )
     return path
 
 
@@ -435,12 +567,22 @@ class WongnaiScraper:
         **_: Any,
     ) -> None:
         self.locations = normalize_locations(locations)
-        if isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= MAX_PAGE_SIZE:
+        if (
+            isinstance(page_size, bool)
+            or not isinstance(page_size, int)
+            or not 1 <= page_size <= MAX_PAGE_SIZE
+        ):
             raise ValueError(f"page_size must be an integer from 1 to {MAX_PAGE_SIZE}")
-        if isinstance(min_rows, bool) or not isinstance(min_rows, int) or not 1 <= min_rows <= MAX_ROWS:
+        if (
+            isinstance(min_rows, bool)
+            or not isinstance(min_rows, int)
+            or not 1 <= min_rows <= MAX_ROWS
+        ):
             raise ValueError(f"min_rows must be an integer from 1 to {MAX_ROWS}")
         if not re.fullmatch(r"[a-z0-9_]+", output_stem):
-            raise ValueError("output_stem must contain only lowercase letters, numbers, and underscores")
+            raise ValueError(
+                "output_stem must contain only lowercase letters, numbers, and underscores"
+            )
         self.page_size = page_size
         self.min_rows = min_rows
         self.output_stem = output_stem
@@ -457,8 +599,12 @@ class WongnaiScraper:
         )
         captured_at = _utc_now()
         raw_path = write_raw(raw_pages, self.output_dir, self.output_stem)
-        snapshot_path = write_snapshot(rows, captured_at, self.output_dir, self.output_stem)
-        history_path = append_history(rows, captured_at, self.output_dir, self.output_stem)
+        snapshot_path = write_snapshot(
+            rows, captured_at, self.output_dir, self.output_stem
+        )
+        history_path = append_history(
+            rows, captured_at, self.output_dir, self.output_stem
+        )
         print(f"[{self.output_stem}] {len(rows)} restaurants -> {snapshot_path}")
         return [
             {
